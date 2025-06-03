@@ -51,8 +51,13 @@ git clone https://github.com/hbb1/2d-gaussian-splatting.git --recursive
 
 # if you have an environment used for 3dgs, use it
 # if not, create a new environment
-conda env create --file environment.yml
-conda activate surfel_splatting
+conda create -n 2dgs python=3.10
+conda activate 2dgs
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+pip install ffmpeg pillow typing_extensions open3d mediapy lpips scikit-image tqdm trimesh plyfile opencv-python
+pip install submodules/diff-surfel-rasterization
+pip install submodules/simple-knn
+
 ```
 ## Training
 To train a scene, simply use
