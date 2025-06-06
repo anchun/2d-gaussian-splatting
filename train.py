@@ -46,6 +46,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     viewpoint_stack = None
     ema_loss_for_log = 0.0
+    ema_psnr_for_log = 0.0
     ema_dist_for_log = 0.0
     ema_normal_for_log = 0.0
 
@@ -68,18 +69,28 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         
         render_pkg = render(viewpoint_cam, gaussians, pipe, background)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+        rend_dist = render_pkg["rend_dist"]
+        rend_normal  = render_pkg['rend_normal']
+        surf_normal = render_pkg['surf_normal']
         
         gt_image = viewpoint_cam.original_image.cuda()
+        
+        if viewpoint_cam.gt_alpha_mask is not None:
+            gt_alpha_mask = viewpoint_cam.gt_alpha_mask > 0.5
+            gt_image = gt_image * gt_alpha_mask
+            image = image * gt_alpha_mask
+            rend_dist = rend_dist * gt_alpha_mask
+            rend_normal = rend_normal * gt_alpha_mask
+            surf_normal = surf_normal * gt_alpha_mask
+            
         Ll1 = l1_loss(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+        rend_psnr = psnr(image, gt_image).mean().double()
         
         # regularization
         lambda_normal = opt.lambda_normal if iteration > 7000 else 0.0
         lambda_dist = opt.lambda_dist if iteration > 3000 else 0.0
 
-        rend_dist = render_pkg["rend_dist"]
-        rend_normal  = render_pkg['rend_normal']
-        surf_normal = render_pkg['surf_normal']
         normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
         normal_loss = lambda_normal * (normal_error).mean()
         dist_loss = lambda_dist * (rend_dist).mean()
@@ -96,11 +107,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             ema_dist_for_log = 0.4 * dist_loss.item() + 0.6 * ema_dist_for_log
             ema_normal_for_log = 0.4 * normal_loss.item() + 0.6 * ema_normal_for_log
+            ema_psnr_for_log = 0.4 * rend_psnr + 0.6 * ema_psnr_for_log
 
 
             if iteration % 10 == 0:
                 loss_dict = {
                     "Loss": f"{ema_loss_for_log:.{5}f}",
+                    "PSNR": f"{ema_psnr_for_log:.{3}f}",
                     "distort": f"{ema_dist_for_log:.{5}f}",
                     "normal": f"{ema_normal_for_log:.{5}f}",
                     "Points": f"{len(gaussians.get_xyz)}"
@@ -211,6 +224,10 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                     render_pkg = renderFunc(viewpoint, scene.gaussians, *renderArgs)
                     image = torch.clamp(render_pkg["render"], 0.0, 1.0).to("cuda")
                     gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+                    if viewpoint.gt_alpha_mask is not None:
+                        gt_alpha_mask = viewpoint.gt_alpha_mask > 0.5
+                        image = image * gt_alpha_mask
+                        gt_image = gt_image * gt_alpha_mask
                     if tb_writer and (idx < 5):
                         from utils.general_utils import colormap
                         depth = render_pkg["surf_depth"]
