@@ -272,7 +272,8 @@ class GaussianModel:
         if self.num_classes > 0:
             for idx, attr_name in enumerate(semantic_names):
                semantic[:, idx] = np.asarray(plydata.elements[0][attr_name])
-            semantic_masks = (semantic[:, 1] > 0.5)
+            #if self.num_classes == 2:
+            #    semantic_masks = (semantic[:, 1] > semantic[:, 0])
 
         self._xyz = nn.Parameter(torch.tensor(xyz[semantic_masks], dtype=torch.float, device="cuda").requires_grad_(True))
         self._features_dc = nn.Parameter(torch.tensor(features_dc[semantic_masks], dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
