@@ -31,7 +31,7 @@ except ImportError:
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
-    gaussians = GaussianModel(dataset.sh_degree)
+    gaussians = GaussianModel(dataset.sh_degree, dataset.num_semantic_class)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
     if checkpoint:
@@ -46,6 +46,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     viewpoint_stack = None
     ema_loss_for_log = 0.0
+    ema_semantic_loss_for_log = 0.0
     ema_psnr_for_log = 0.0
     ema_dist_for_log = 0.0
     ema_normal_for_log = 0.0
@@ -75,7 +76,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         
         gt_image = viewpoint_cam.original_image.cuda()
         
-        if viewpoint_cam.gt_alpha_mask is not None:
+        if dataset.training_with_mask and viewpoint_cam.gt_alpha_mask is not None:
             gt_alpha_mask = viewpoint_cam.gt_alpha_mask > 0.5
             gt_image = gt_image * gt_alpha_mask
             image = image * gt_alpha_mask
@@ -94,9 +95,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
         normal_loss = lambda_normal * (normal_error).mean()
         dist_loss = lambda_dist * (rend_dist).mean()
+        
+        semantic_loss = torch.zeros_like(Ll1)
+        lambda_semantic = opt.lambda_semantic if iteration > 3000 else 0.0
+        if dataset.num_semantic_class > 0 and viewpoint_cam.gt_semantic is not None:
+            gt_semantic = viewpoint_cam.gt_semantic.long()  # [1, H, W]
+            semantic = render_pkg['semantic'].unsqueeze(0)  # [1, S, H, W]
+            semantic_loss = lambda_semantic * torch.nn.functional.cross_entropy(
+                    input=semantic,
+                    target=gt_semantic,
+                    ignore_index=-1,
+                    reduction='mean'
+            )
 
         # loss
-        total_loss = loss + dist_loss + normal_loss
+        total_loss = loss + dist_loss + normal_loss + semantic_loss
         
         total_loss.backward()
 
@@ -105,6 +118,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         with torch.no_grad():
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+            ema_semantic_loss_for_log = 0.4 * semantic_loss.item() + 0.6 * ema_semantic_loss_for_log
             ema_dist_for_log = 0.4 * dist_loss.item() + 0.6 * ema_dist_for_log
             ema_normal_for_log = 0.4 * normal_loss.item() + 0.6 * ema_normal_for_log
             ema_psnr_for_log = 0.4 * rend_psnr + 0.6 * ema_psnr_for_log
@@ -114,7 +128,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 loss_dict = {
                     "Loss": f"{ema_loss_for_log:.{5}f}",
                     "PSNR": f"{ema_psnr_for_log:.{3}f}",
-                    "distort": f"{ema_dist_for_log:.{5}f}",
+                    "semantic": f"{ema_semantic_loss_for_log:.{3}f}",
                     "normal": f"{ema_normal_for_log:.{5}f}",
                     "Points": f"{len(gaussians.get_xyz)}"
                 }
@@ -129,7 +143,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 tb_writer.add_scalar('train_loss_patches/dist_loss', ema_dist_for_log, iteration)
                 tb_writer.add_scalar('train_loss_patches/normal_loss', ema_normal_for_log, iteration)
 
-            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
+            training_report(tb_writer, dataset, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
@@ -203,7 +217,7 @@ def prepare_output_and_logger(args):
     return tb_writer
 
 @torch.no_grad()
-def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs):
+def training_report(tb_writer, dataset, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs):
     if tb_writer:
         tb_writer.add_scalar('train_loss_patches/reg_loss', Ll1.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
@@ -224,7 +238,7 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                     render_pkg = renderFunc(viewpoint, scene.gaussians, *renderArgs)
                     image = torch.clamp(render_pkg["render"], 0.0, 1.0).to("cuda")
                     gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
-                    if viewpoint.gt_alpha_mask is not None:
+                    if dataset.training_with_mask and viewpoint.gt_alpha_mask is not None:
                         gt_alpha_mask = viewpoint.gt_alpha_mask > 0.5
                         image = image * gt_alpha_mask
                         gt_image = gt_image * gt_alpha_mask

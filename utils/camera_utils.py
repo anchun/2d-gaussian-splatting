@@ -13,6 +13,7 @@ from scene.cameras import Camera
 import numpy as np
 import os
 from PIL import Image
+import torch
 from utils.general_utils import PILtoTorch
 from utils.graphics_utils import fov2focal
 
@@ -40,8 +41,8 @@ def loadCam(args, id, cam_info, resolution_scale):
         scale = float(global_down) * float(resolution_scale)
         resolution = (int(orig_w / scale), int(orig_h / scale))
 
+    loaded_semantic = None
     if len(cam_info.image.split()) > 3:
-        import torch
         resized_image_rgb = torch.cat([PILtoTorch(im, resolution) for im in cam_info.image.split()[:3]], dim=0)
         loaded_mask = PILtoTorch(cam_info.image.split()[3], resolution)
         gt_image = resized_image_rgb
@@ -49,6 +50,9 @@ def loadCam(args, id, cam_info, resolution_scale):
         resized_image_rgb = PILtoTorch(cam_info.image, resolution)
         cam_mask = Image.open(cam_info.mask_path).convert("L")
         loaded_mask = PILtoTorch(cam_mask, resolution)
+        cam_semantic = cam_mask.resize(resolution, Image.NEAREST)
+        loaded_semantic = (torch.from_numpy(np.array(cam_semantic)) > 128).long()
+        loaded_semantic = loaded_semantic.unsqueeze(dim=-1).permute(2, 0, 1)
         gt_image = resized_image_rgb
     else:
         resized_image_rgb = PILtoTorch(cam_info.image, resolution)
@@ -58,7 +62,7 @@ def loadCam(args, id, cam_info, resolution_scale):
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
                   image=gt_image, gt_alpha_mask=loaded_mask,
-                  image_name=cam_info.image_name, uid=id, data_device=args.data_device)
+                  image_name=cam_info.image_name, uid=id, gt_semantic=loaded_semantic, data_device=args.data_device)
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args):
     camera_list = []
