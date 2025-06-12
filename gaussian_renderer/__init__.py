@@ -112,6 +112,10 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         cov3D_precomp = cov3D_precomp
     )
     
+    # for probalility semantic rendering, we need to normalize the rendered semantics
+    rendered_semantics = rendered_semantics / (torch.sum(rendered_semantics, dim=0, keepdim=True) + 1e-8) # normalize to probabilities
+    rendered_semantics = torch.log(rendered_semantics + 1e-8) # change for cross entropy loss
+    
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
     rets =  {"render": rendered_image,

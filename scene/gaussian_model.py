@@ -120,7 +120,8 @@ class GaussianModel:
     
     @property
     def get_semantic(self):
-        return self._semantic
+        return torch.nn.functional.softmax(self._semantic, dim=1)
+        
     
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_xyz, self.get_scaling, scaling_modifier, self._rotation)
@@ -219,6 +220,45 @@ class GaussianModel:
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
         if self.num_classes > 0:
+            attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation, semantic), axis=1)
+        else:
+            attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+        elements[:] = list(map(tuple, attributes))
+        el = PlyElement.describe(elements, 'vertex')
+        PlyData([el]).write(path)
+
+    def save_ply_object(self, path, culling_bbox):
+        mkdir_p(os.path.dirname(path))
+
+        xyz = self._xyz.detach().cpu().numpy()
+        normals = np.zeros_like(xyz)
+        f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        f_rest = self._features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        opacities = self._opacity.detach().cpu().numpy()
+        scale = self._scaling.detach().cpu().numpy()
+        rotation = self._rotation.detach().cpu().numpy()
+        semantic = self._semantic.detach().cpu().numpy()
+        
+        masks = np.ones(xyz.shape[0], dtype=bool)
+        if self.num_classes == 2:
+            masks = (semantic[:, 1] > semantic[:, 0])
+        if len(culling_bbox) == 6:
+            xmin, ymin, zmin, xmax, ymax, zmax = culling_bbox
+            threshold = 0.05 # threshold for 5 cm
+            masks = np.logical_and(masks, np.all(np.logical_and(xyz >= [xmin - threshold, ymin - threshold, zmin], xyz <= [xmax + threshold, ymax + threshold, zmax + threshold]), axis=1))
+        xyz = xyz[masks]
+        normals = normals[masks]
+        f_dc = f_dc[masks]
+        f_rest = f_rest[masks]
+        opacities = opacities[masks]
+        scale = scale[masks]
+        rotation = rotation[masks]    
+
+        dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
+
+        elements = np.empty(xyz.shape[0], dtype=dtype_full)
+        if self.num_classes > 0:
+            semantic = semantic[masks]
             attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation, semantic), axis=1)
         else:
             attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
