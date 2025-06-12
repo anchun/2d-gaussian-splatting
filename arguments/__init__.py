@@ -55,7 +55,7 @@ class ModelParams(ParamGroup):
         self.data_device = "cuda"
         self.eval = False
         self.num_semantic_class = 2
-        self.training_with_mask = False
+        self.training_with_mask = True
         self.render_items = ['RGB', 'Alpha', 'Normal', 'Depth', 'Edge', 'Curvature']
         super().__init__(parser, "Loading Parameters", sentinel)
 
@@ -89,6 +89,7 @@ class OptimizationParams(ParamGroup):
         self.lambda_dist = 0.0
         self.lambda_normal = 0.05
         self.lambda_semantic = 0.5
+        self.lambda_foreground_loss = 0.2
         self.opacity_cull = 0.05
 
         self.densification_interval = 100

@@ -22,8 +22,11 @@ for dir in $dirs; do
         continue
     fi
     echo "$(date '+%Y-%m-%d %H:%M:%S') [$count/$total]Training dataset: $dataset_name"
-    python train.py -s ${dataset_dir}/${dataset_name} -m ${dataset_dir}/${dataset_name}/output --resolution 1 --iterations 50000 --densify_until_iter 25000 --max_gaussian_points 2000000
-    touch ${dataset_dir}/${dataset_name}/output/.processed
+    max_gaussian_points=2000000
+    python train.py -s ${dataset_dir}/${dataset_name} -m ${dataset_dir}/${dataset_name}/output --resolution 1 --densify_grad_threshold 0.0001 --max_gaussian_points ${max_gaussian_points}
+    if [ -f ${dataset_dir}/${dataset_name}/output/point_cloud/iteration_${iterations}/point_cloud_object.ply ]; then
+        touch ${dataset_dir}/${dataset_name}/output/.processed
+    fi
     echo "$(date '+%Y-%m-%d %H:%M:%S') [$count/$total]Training done: $dataset_name"
 done
 

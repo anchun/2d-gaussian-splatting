@@ -30,7 +30,7 @@ except ImportError:
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
     first_iter = 0
-    tb_writer = prepare_output_and_logger(dataset)
+    prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree, dataset.num_semantic_class)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
@@ -46,8 +46,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     viewpoint_stack = None
     ema_loss_for_log = 0.0
+    ema_loss_foreground_for_log = 0.0
     ema_semantic_loss_for_log = 0.0
-    ema_psnr_for_log = 0.0
+    ema_psnr_foreground_for_log = 0.0
     ema_dist_for_log = 0.0
     ema_normal_for_log = 0.0
 
@@ -77,16 +78,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         gt_image = viewpoint_cam.original_image.cuda()
         
         if dataset.training_with_mask and viewpoint_cam.gt_alpha_mask is not None:
-            gt_alpha_mask = viewpoint_cam.gt_alpha_mask > 0.5
-            gt_image = gt_image * gt_alpha_mask
-            image = image * gt_alpha_mask
-            rend_dist = rend_dist * gt_alpha_mask
-            rend_normal = rend_normal * gt_alpha_mask
-            surf_normal = surf_normal * gt_alpha_mask
-            
-        Ll1 = l1_loss(image, gt_image)
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
-        rend_psnr = psnr(image, gt_image).mean().double()
+            gt_image_forground = gt_image * (viewpoint_cam.gt_alpha_mask >= 0.5)
+            image_forground = image * (viewpoint_cam.gt_alpha_mask >= 0.5)
+            loss_forground = (1.0 - opt.lambda_dssim) * l1_loss(image_forground, gt_image_forground) + opt.lambda_dssim * (1.0 - ssim(image_forground, gt_image_forground))
+            loss_forground = opt.lambda_foreground_loss * loss_forground
+            rend_psnr = psnr(image_forground, gt_image_forground).mean().double()
+        else: 
+            loss_forground = torch.tensor(0)
+            rend_psnr = psnr(image, gt_image).mean().double()
+        loss = (1.0 - opt.lambda_dssim) * l1_loss(image, gt_image) + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
         
         # regularization
         lambda_normal = opt.lambda_normal if iteration > 7000 else 0.0
@@ -96,7 +96,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         normal_loss = lambda_normal * (normal_error).mean()
         dist_loss = lambda_dist * (rend_dist).mean()
         
-        semantic_loss = torch.zeros_like(Ll1)
+        semantic_loss = torch.tensor(0)
         lambda_semantic = opt.lambda_semantic if iteration > 3000 else 0.0
         if dataset.num_semantic_class > 0 and viewpoint_cam.gt_semantic is not None:
             gt_semantic = viewpoint_cam.gt_semantic.long()  # [1, H, W]
@@ -109,7 +109,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             )
 
         # loss
-        total_loss = loss + dist_loss + normal_loss + semantic_loss
+        total_loss = loss + loss_forground + dist_loss + normal_loss + semantic_loss
         
         total_loss.backward()
 
@@ -118,17 +118,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         with torch.no_grad():
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+            ema_loss_foreground_for_log = 0.4 * loss_forground.item() + 0.6 * ema_loss_foreground_for_log
             ema_semantic_loss_for_log = 0.4 * semantic_loss.item() + 0.6 * ema_semantic_loss_for_log
             ema_dist_for_log = 0.4 * dist_loss.item() + 0.6 * ema_dist_for_log
             ema_normal_for_log = 0.4 * normal_loss.item() + 0.6 * ema_normal_for_log
-            ema_psnr_for_log = 0.4 * rend_psnr + 0.6 * ema_psnr_for_log
+            ema_psnr_foreground_for_log = 0.4 * rend_psnr + 0.6 * ema_psnr_foreground_for_log
 
 
             if iteration % 10 == 0:
                 loss_dict = {
                     "Loss": f"{ema_loss_for_log:.{5}f}",
-                    "PSNR": f"{ema_psnr_for_log:.{3}f}",
-                    "semantic": f"{ema_semantic_loss_for_log:.{3}f}",
+                    "Loss-F": f"{ema_loss_foreground_for_log:.{5}f}",
+                    "PSNR-F": f"{ema_psnr_foreground_for_log:.{5}f}",
+                    "semantic": f"{ema_semantic_loss_for_log:.{5}f}",
                     "normal": f"{ema_normal_for_log:.{5}f}",
                     "Points": f"{len(gaussians.get_xyz)}"
                 }
@@ -138,16 +140,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration == opt.iterations:
                 progress_bar.close()
 
-            # Log and save
-            if tb_writer is not None:
-                tb_writer.add_scalar('train_loss_patches/dist_loss', ema_dist_for_log, iteration)
-                tb_writer.add_scalar('train_loss_patches/normal_loss', ema_normal_for_log, iteration)
-
-            training_report(tb_writer, dataset, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
-
 
             # Densification
             if iteration < opt.densify_until_iter and len(gaussians.get_xyz) < opt.max_gaussian_points:
@@ -207,78 +202,6 @@ def prepare_output_and_logger(args):
     os.makedirs(args.model_path, exist_ok = True)
     with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
         cfg_log_f.write(str(Namespace(**vars(args))))
-
-    # Create Tensorboard writer
-    tb_writer = None
-    if TENSORBOARD_FOUND:
-        tb_writer = SummaryWriter(args.model_path)
-    else:
-        print("Tensorboard not available: not logging progress")
-    return tb_writer
-
-@torch.no_grad()
-def training_report(tb_writer, dataset, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs):
-    if tb_writer:
-        tb_writer.add_scalar('train_loss_patches/reg_loss', Ll1.item(), iteration)
-        tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
-        tb_writer.add_scalar('iter_time', elapsed, iteration)
-        tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
-
-    # Report test and samples of training set
-    if iteration in testing_iterations:
-        torch.cuda.empty_cache()
-        validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()}, 
-                              {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]})
-
-        for config in validation_configs:
-            if config['cameras'] and len(config['cameras']) > 0:
-                l1_test = 0.0
-                psnr_test = 0.0
-                for idx, viewpoint in enumerate(config['cameras']):
-                    render_pkg = renderFunc(viewpoint, scene.gaussians, *renderArgs)
-                    image = torch.clamp(render_pkg["render"], 0.0, 1.0).to("cuda")
-                    gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
-                    if dataset.training_with_mask and viewpoint.gt_alpha_mask is not None:
-                        gt_alpha_mask = viewpoint.gt_alpha_mask > 0.5
-                        image = image * gt_alpha_mask
-                        gt_image = gt_image * gt_alpha_mask
-                    if tb_writer and (idx < 5):
-                        from utils.general_utils import colormap
-                        depth = render_pkg["surf_depth"]
-                        norm = depth.max()
-                        depth = depth / norm
-                        depth = colormap(depth.cpu().numpy()[0], cmap='turbo')
-                        tb_writer.add_images(config['name'] + "_view_{}/depth".format(viewpoint.image_name), depth[None], global_step=iteration)
-                        tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
-
-                        try:
-                            rend_alpha = render_pkg['rend_alpha']
-                            rend_normal = render_pkg["rend_normal"] * 0.5 + 0.5
-                            surf_normal = render_pkg["surf_normal"] * 0.5 + 0.5
-                            tb_writer.add_images(config['name'] + "_view_{}/rend_normal".format(viewpoint.image_name), rend_normal[None], global_step=iteration)
-                            tb_writer.add_images(config['name'] + "_view_{}/surf_normal".format(viewpoint.image_name), surf_normal[None], global_step=iteration)
-                            tb_writer.add_images(config['name'] + "_view_{}/rend_alpha".format(viewpoint.image_name), rend_alpha[None], global_step=iteration)
-
-                            rend_dist = render_pkg["rend_dist"]
-                            rend_dist = colormap(rend_dist.cpu().numpy()[0])
-                            tb_writer.add_images(config['name'] + "_view_{}/rend_dist".format(viewpoint.image_name), rend_dist[None], global_step=iteration)
-                        except:
-                            pass
-
-                        if iteration == testing_iterations[0]:
-                            tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
-
-                    l1_test += l1_loss(image, gt_image).mean().double()
-                    psnr_test += psnr(image, gt_image).mean().double()
-
-                psnr_test /= len(config['cameras'])
-                l1_test /= len(config['cameras'])
-                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
-                if tb_writer:
-                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
-                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
-
-        torch.cuda.empty_cache()
 
 if __name__ == "__main__":
     # Set up command line argument parser
